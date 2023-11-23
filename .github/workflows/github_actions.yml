@@ -1,0 +1,110 @@
+name: Generating artifacts for SEI
+run-name: ${{ github.actor }} is creating artifacts
+on: 
+    push:
+        branches:
+          - main
+    workflow_dispatch:
+
+jobs:
+    check_env:
+        runs-on: ubuntu-latest
+        env:
+            integration_id: 16
+            sample: ${{ github.run_id }}
+        steps:
+            - name: Check artifacts
+              run: echo 'Integration ID - ${{ env.integration_id }}'
+
+    running-resuable-workflow:
+        runs-on: ubuntu-latest
+        env:
+            check_run_id: 0
+            modulo: 1
+        steps:
+            - name: Workflow Step 1
+              run: echo 'Hello World';echo ${{ github.run_id }};echo ${{ env.modulo }}
+            - name: Workflow Step 2 - If condition
+              run: echo 'Exiting successfully'
+
+    deploy-to-docker:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Configure Python in Ubuntu Environment
+              run: |
+                python3 -m pip install requests
+                docker -v
+            - uses: actions/checkout@v4
+            - name: List files
+              run: |
+                pwd
+                ls
+            - name: Execute Python script
+              run: |
+                python3 sample_script.py
+                ls /tmp/
+              working-directory: ./temp/
+
+            - name: Docker Login
+              uses: docker/login-action@v1
+              with:
+                username: ${{ secrets.DOCKER_USERNAME }}
+                password: ${{ secrets.DOCKER_PASSWORD }}
+            - name: Build docker image
+              run: |
+               echo "Building image"
+               docker system info | grep -E 'Username|Registry'
+               docker build -t karanpanchalharness/temp-test_rep01:v1.1.0 .
+              working-directory: ./temp/
+
+            - name: Push Docker Image
+              id: docker_deploy
+              run: |
+                docker push karanpanchalharness/temp-test_rep01:v1.1.0
+                echo "digest=$(docker inspect --format='{{index .RepoDigests 0}}' karanpanchalharness/temp-test_rep01:v1.1.0 | cut -d'@' -f2)" >> "$GITHUB_OUTPUT"   
+              working-directory: ./temp/
+            - name: Logout Docker
+              run: |
+                  echo "${{steps.docker_deploy.outputs.digest}}"
+                  docker logout
+        outputs:
+            docker_digest: ${{ steps.docker_deploy.outputs.digest }}
+
+    push_artifacts_to_sei:
+        runs-on: ubuntu-latest
+        needs: deploy-to-docker
+        steps:
+            - name: Push artifacts to SEI Endpoint
+              id: push_artifacts
+              env:
+                base_url: "https://testapi1.propelo.ai" # change the URL based on environment e.g. eu1, asia1, etc.
+                # List of artifacts can be supported, just need to add similar object of artifact in the below payload variable under the `artifacts` key.
+                # Note: name, location and tag of artifact are required, if type, artifact_created_at, digest are not available then remove the fields from the object.
+                # Artifact object
+                #   name: Image name of artifact
+                #   location: Location of artifact where artifact stored e.g. ghcr.io/organization/repository
+                #   tag: Tag of image e.g. ghcr.io/organization/repository:v0.1.1 where v0.1.1 is tag/qualifier
+                #   digest: Digest of generated artifact <OPTIONAL>
+                #   type: Type of generated artifact <OPTIONAL>
+                #   artifact_created_at: Creation time of artifact in ISO format e.g. 2023-01-01T12:00:00.000+00:00 <OPTIONAL>
+                integration_id: 16
+                docker_image: 'karanpanchalharness/temp-test_rep01'
+                tag: v1.1.0
+                type: 'Test_repo2'
+                payload: '{"integration_id":"16","repository":"${{ github.repository }}","job_run_number":"${{ github.run_number }}","job_name":"${{ github.workflow }}","artifacts":[{"name":"temp-test_rep01", "location":"registry.hub.docker.com/karanpanchalharness", "tag":"v1.1.0", "type":"container", "digest": "${{needs.deploy-to-docker.outputs.docker_digest}}","artifacts_created_at": "2023-01-01T12:00:00.000+00:00"}]}'
+              run: |
+                curl '${{ env.base_url }}/v1/cicd/push_artifacts' -H 'accept: application/json' -H 'authorization:Apikey ${{ secrets.SEI_API_KEY }}' -H 'content-type:application/json' --data-raw '${{ env.payload }}' --compressed --globoff
+
+            - name: Push params to SEI Endpoint
+              id: push_params
+              env:
+                base_url: "https://testapi1.propelo.ai" # change the URL based on environment e.g. eu1, asia1, etc.
+                # All workflow level environment variables can be pushed as job run params.
+                # List of job run params can be supported, just need to add similar object of job run param in the below payload variable under the `params` key.
+                # Note: name, value and type of param are required.
+                # Param object
+                #   name: Environment variable name
+                #   type: Type of environment variable (default string can be passed)
+                #   value: Value of environment variable
+                payload: '{"integration_id":"16","repository":"${{ github.repository }}","job_run_number":"${{ github.run_number }}","job_name":"${{ github.workflow }}","params":[{"name":"docker_image","type":"string","value":"karanpanchalharness/temp-test_rep01"}, {"name":"tag","type":"string","value":"v1.1.0"}, {"name":"artifacts_created_at","type":"string","value":"2023-01-01T12:00:00.000+00:00"}]}'
+              run: curl '${{ env.base_url }}/v1/cicd/push_job_run_params' -H 'accept:application/json' -H 'authorization:Apikey ${{ secrets.SEI_API_KEY }}' -H 'content-type:application/json' --data-raw '${{ env.payload }}' --compressed --globoff
